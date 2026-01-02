@@ -160,10 +160,17 @@ def get_hash(text):
 def get_page_id(source):
     """Generate unique ID for a page/URL"""
     if source.startswith(('http://', 'https://')):
+        # URL: use host + full path
         parsed = urlparse(source)
-        return slugify(f"{parsed.netloc}-{parsed.path}")
+        page_id = f"{parsed.netloc}{parsed.path}"
     else:
-        return slugify(Path(source).stem)
+        # Local file: use absolute path
+        page_id = str(Path(source).resolve())
+
+    # Create readable slug with hash suffix for uniqueness
+    slug = slugify(page_id)[:60]
+    hash_suffix = hashlib.md5(page_id.encode()).hexdigest()[:8]
+    return f"{slug}-{hash_suffix}"
 
 
 class Page2Pod:
