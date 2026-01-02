@@ -177,6 +177,9 @@ def get_page_id(source):
 
 class Page2Pod:
     def __init__(self, source, output_dir=None, cache_dir=None, voice=DEFAULT_VOICE, model=DEFAULT_MODEL):
+        # Resolve local paths to absolute
+        if not source.startswith(('http://', 'https://')):
+            source = str(Path(source).resolve())
         self.source = source
         self.voice = voice
         self.model = model
