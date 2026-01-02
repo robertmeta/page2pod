@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: page2pod
+Version: 0.1.0
+Summary: Convert web pages to chapter-based podcasts
+Home-page: https://github.com/robertmeta/page2pod
+Author: Robert Melton
+License: MIT
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Requires-Python: >=3.8
+License-File: LICENSE
+Requires-Dist: openai
+Requires-Dist: mutagen
+Requires-Dist: beautifulsoup4
+Requires-Dist: requests
+Dynamic: author
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

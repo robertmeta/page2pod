@@ -1,0 +1,2 @@
+[console_scripts]
+page2pod = page2pod:main

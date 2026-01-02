@@ -1,0 +1,10 @@
+LICENSE
+README.md
+page2pod.py
+setup.py
+page2pod.egg-info/PKG-INFO
+page2pod.egg-info/SOURCES.txt
+page2pod.egg-info/dependency_links.txt
+page2pod.egg-info/entry_points.txt
+page2pod.egg-info/requires.txt
+page2pod.egg-info/top_level.txt
