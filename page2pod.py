@@ -12,7 +12,12 @@ Usage:
 Options:
     -o, --output DIR      Output directory (default: current directory)
     -c, --cache DIR       Cache directory (default: ~/.cache/page2pod)
-    -v, --voice VOICE     OpenAI TTS voice (default: onyx)
+    -v, --voice VOICE     OpenAI TTS voice for main content (default: onyx)
+    --code-voice VOICE    OpenAI TTS voice for code blocks (default: nova)
+    --code-mode MODE      How to handle code blocks:
+                            skip     - Just say "Code example skipped" (default)
+                            verbatim - Read code aloud with punctuation verbalized
+                            describe - AI describes what the code does
     --force               Force regenerate all chapters
     --combine             Just recombine existing chapters
     --chapter N           Regenerate only chapter N
@@ -49,6 +54,7 @@ except ImportError as e:
 
 # Default settings
 DEFAULT_VOICE = "onyx"
+DEFAULT_CODE_VOICE = "nova"  # Different voice for code blocks
 DEFAULT_MODEL = "tts-1-hd"
 DEFAULT_CACHE = Path.home() / ".cache" / "page2pod"
 
@@ -92,10 +98,132 @@ def clean_for_speech(text):
     return text.strip()
 
 
-def extract_chapters(soup, title=None):
+def verbalize_code(code):
+    """Convert code punctuation to spoken words for TTS, including structure"""
+    lines = code.split('\n')
+    verbalized_lines = []
+
+    for line in lines:
+        if not line.strip():
+            continue
+
+        # Count indentation
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        indent_levels = indent // 4  # Assume 4-space indentation
+
+        # Add indent announcement
+        if indent_levels > 0:
+            prefix = f"indent {indent_levels}, " if indent_levels == 1 else f"indent {indent_levels} levels, "
+        else:
+            prefix = ""
+
+        # Replace punctuation with words
+        replacements = [
+            ('==', ' equals equals '), ('!=', ' not equals '),
+            ('<=', ' less or equal '), ('>=', ' greater or equal '),
+            ('&&', ' and and '), ('||', ' or or '),
+            ('->', ' arrow '), ('=>', ' fat arrow '),
+            ('::', ' colon colon '), ('...', ' dot dot dot '),
+            ('//', ' slash slash '), ('/*', ' slash star '), ('*/', ' star slash '),
+            ('++', ' plus plus '), ('--', ' minus minus '),
+            ('+=', ' plus equals '), ('-=', ' minus equals '),
+            ('*=', ' times equals '), ('/=', ' divide equals '),
+            ('{', ' open brace '), ('}', ' close brace '),
+            ('(', ' open paren '), (')', ' close paren '),
+            ('[', ' open bracket '), (']', ' close bracket '),
+            ('<', ' less than '), ('>', ' greater than '),
+            ('&', ' ampersand '), ('|', ' pipe '), ('@', ' at '),
+            ('#', ' hash '), ('$', ' dollar '), ('%', ' percent '),
+            ('!', ' bang '), ('?', ' question '), (':', ' colon '),
+            (';', ' semicolon '), (',', ' comma '),
+            ('=', ' equals '), ('+', ' plus '), ('-', ' minus '),
+            ('*', ' star '), ('/', ' slash '), ('\\', ' backslash '),
+            ('_', ' underscore '), ('`', ' backtick '),
+            ('~', ' tilde '), ('^', ' caret '),
+        ]
+
+        result = stripped
+        for char, word in replacements:
+            result = result.replace(char, word)
+
+        verbalized_lines.append(prefix + result)
+
+    return ". New line. ".join(verbalized_lines)
+
+
+def describe_code_ai(code, language, client):
+    """Use AI to describe code in plain English"""
+    prompt = f"""Describe this {language or 'code'} in plain English for a listener.
+Be concise but complete. Explain what it does, not how it's written.
+Do not read the code literally - describe its purpose and behavior.
+Keep it under 3 sentences unless the code is complex.
+
+Code:
+```{language}
+{code}
+```
+
+Plain English description:"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=200
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def skip_code_text(language):
+    """Generate skip announcement for code block"""
+    if language:
+        return f"{language.capitalize()} code example skipped."
+    return "Code example skipped."
+
+
+def get_code_block_title(code, language=""):
+    """Generate descriptive title for code block"""
+    if language:
+        language = language.capitalize()
+
+    lines = code.strip().split('\n')
+    first_line = lines[0] if lines else ""
+
+    # Function definitions
+    if re.match(r'^\s*(def|func|function|fn)\s+\w+', first_line):
+        match = re.search(r'(def|func|function|fn)\s+(\w+)', first_line)
+        if match:
+            return f"{language} Function: {match.group(2)}" if language else f"Function: {match.group(2)}"
+
+    # Class definitions
+    if re.match(r'^\s*(class|struct|type|interface)\s+\w+', first_line):
+        match = re.search(r'(class|struct|type|interface)\s+(\w+)', first_line)
+        if match:
+            kind = match.group(1).capitalize()
+            return f"{language} {kind}: {match.group(2)}" if language else f"{kind}: {match.group(2)}"
+
+    # Import statements
+    if re.match(r'^\s*(import|from|require|use|include)', first_line):
+        return f"{language} Imports" if language else "Import Statements"
+
+    # Variable/const declarations
+    if re.match(r'^\s*(const|let|var|val)\s+', first_line):
+        return f"{language} Declaration" if language else "Variable Declaration"
+
+    # Default
+    if language:
+        return f"{language} Code Example"
+    return "Code Example"
+
+
+def extract_chapters(soup, title=None, code_voice=DEFAULT_CODE_VOICE, main_voice=DEFAULT_VOICE,
+                     code_mode="skip", client=None):
     """
     Extract chapters from HTML using H2 headings.
-    Returns list of (title, text) tuples.
+    Code blocks handled based on code_mode: skip, verbatim, or describe.
+    Returns list of (title, text, voice) tuples.
     """
     chapters = []
 
@@ -114,7 +242,80 @@ def extract_chapters(soup, title=None):
     # Find main content area
     main = soup.find('main') or soup.find('article') or soup.find('body')
     if not main:
-        return [(title, clean_for_speech(get_text_content(soup)))]
+        return [(title, clean_for_speech(get_text_content(soup)), main_voice)]
+
+    def process_section(section_html, section_title):
+        """Process a section, splitting out code blocks"""
+        result = []
+        section_soup = BeautifulSoup(section_html, 'html.parser')
+
+        # Find all code blocks (pre > code or pre with class)
+        code_blocks = section_soup.find_all('pre')
+
+        if not code_blocks:
+            # No code blocks - just text
+            text = clean_for_speech(get_text_content(section_soup))
+            if text:
+                result.append((section_title, text, main_voice))
+            return result
+
+        # Replace code blocks with markers and split
+        content = str(section_soup)
+        code_data = []
+
+        for i, pre in enumerate(code_blocks):
+            # Get language from class (e.g., language-python, hljs python)
+            language = ""
+            code_elem = pre.find('code')
+            if code_elem and code_elem.get('class'):
+                classes = code_elem.get('class')
+                for cls in classes:
+                    if cls.startswith('language-'):
+                        language = cls[9:]
+                        break
+                    elif cls in ['python', 'javascript', 'go', 'rust', 'java', 'c', 'cpp', 'bash', 'shell', 'sql', 'html', 'css']:
+                        language = cls
+                        break
+
+            code_text = pre.get_text()
+            code_data.append((language, code_text))
+            marker = f"__CODE_BLOCK_{i}__"
+            content = content.replace(str(pre), marker, 1)
+
+        # Split by markers
+        parts = re.split(r'(__CODE_BLOCK_\d+__)', content)
+        text_idx = 0
+
+        for part in parts:
+            code_match = re.match(r'__CODE_BLOCK_(\d+)__', part)
+            if code_match:
+                idx = int(code_match.group(1))
+                language, code_text = code_data[idx]
+                code_title = get_code_block_title(code_text, language)
+
+                if code_mode == "skip":
+                    # Just announce and skip
+                    result.append((code_title, skip_code_text(language), main_voice))
+                elif code_mode == "verbatim":
+                    # Read code with punctuation verbalized
+                    verbalized = verbalize_code(code_text)
+                    result.append((code_title, verbalized, code_voice))
+                elif code_mode == "describe" and client:
+                    # AI description
+                    description = describe_code_ai(code_text, language, client)
+                    result.append((code_title, description, main_voice))
+                else:
+                    # Fallback to skip
+                    result.append((code_title, skip_code_text(language), main_voice))
+            else:
+                part_soup = BeautifulSoup(part, 'html.parser')
+                text = clean_for_speech(get_text_content(part_soup))
+                if text:
+                    title_suffix = f" (Part {text_idx + 1})" if text_idx > 0 else ""
+                    result.append((section_title + title_suffix, text, main_voice))
+                    text_idx += 1
+
+        return result
 
     # Split by H2 headings
     content = str(main)
@@ -123,10 +324,7 @@ def extract_chapters(soup, title=None):
 
     # First part is intro (before first H2)
     if parts[0].strip():
-        intro_soup = BeautifulSoup(parts[0], 'html.parser')
-        intro_text = clean_for_speech(get_text_content(intro_soup))
-        if intro_text:
-            chapters.append(("Introduction", intro_text))
+        chapters.extend(process_section(parts[0], "Introduction"))
 
     # Remaining parts alternate: h2_title, content, h2_title, content...
     for i in range(1, len(parts), 2):
@@ -134,25 +332,24 @@ def extract_chapters(soup, title=None):
             h2_title = BeautifulSoup(parts[i], 'html.parser').get_text(separator=' ', strip=True)
             # Clean up anchor link artifacts
             h2_title = re.sub(r'\s*#\s*$', '', h2_title).strip()
-            section_soup = BeautifulSoup(parts[i + 1], 'html.parser')
-            section_text = clean_for_speech(get_text_content(section_soup))
+            chapters.extend(process_section(parts[i + 1], h2_title))
 
-            if section_text:
-                chapters.append((h2_title, section_text))
-
-    # If no H2s found, treat whole page as one chapter
+    # If no chapters found, treat whole page as one chapter
     if not chapters:
         full_text = clean_for_speech(get_text_content(main))
         if full_text:
-            chapters.append((title, full_text))
+            chapters.append((title, full_text, main_voice))
 
     return chapters
 
 
-def extract_chapters_ai(html, client):
+def extract_chapters_ai(html, client, code_voice=DEFAULT_CODE_VOICE, main_voice=DEFAULT_VOICE,
+                        code_mode="skip"):
     """
     Extract chapters using AI for better semantic understanding.
     Works on pages without clear H2 structure.
+    Code blocks handled based on code_mode: skip, verbatim, or describe.
+    Returns list of (title, text, voice) tuples.
     """
     soup = BeautifulSoup(html, 'html.parser')
 
@@ -171,7 +368,29 @@ def extract_chapters_ai(html, client):
     if len(text) > 60000:
         text = text[:60000] + "\n\n[Content truncated...]"
 
-    prompt = """You are preparing a webpage for audio playback via text-to-speech (TTS).
+    # Adjust prompt based on code_mode
+    if code_mode == "skip":
+        code_instructions = """
+CODE BLOCKS:
+- If you encounter code blocks, create a chapter for each one
+- Set type to "code" and include the language
+- Put a brief note like "Python code example" as content (we'll replace it)"""
+    elif code_mode == "describe":
+        code_instructions = """
+CODE BLOCKS:
+- If you encounter code blocks, create a chapter for each one
+- Set type to "code" and include the language
+- Describe what the code does in plain English (1-3 sentences)
+- Do NOT read the code literally, explain its purpose"""
+    else:  # verbatim
+        code_instructions = """
+CODE BLOCKS:
+- If you encounter code blocks, create a chapter for each one
+- Set type to "code" and include the language
+- Convert punctuation to words for TTS (e.g., "{" becomes "open brace")
+- Say "new line" between lines, "indent N" for indentation levels"""
+
+    prompt = f"""You are preparing a webpage for audio playback via text-to-speech (TTS).
 
 HOW THIS WILL BE USED:
 - The webpage displays an audio player with chapter navigation
@@ -189,6 +408,7 @@ YOUR TASK:
 1. Divide the webpage into logical chapter sections (for navigation)
 2. Copy ALL content from each section into the chapter
 3. Make only tiny tweaks for audio clarity (see below)
+4. Handle code blocks as instructed below
 
 CONTENT PRESERVATION RULES:
 - Every sentence from the input MUST appear in your output
@@ -202,6 +422,7 @@ MINOR AUDIO TWEAKS ONLY:
 - Remove "Click here", "Read more", "Back to top" navigation text
 - Expand confusing abbreviations for speech
 - Remove image/diagram references that won't be visible
+{code_instructions}
 
 CHAPTER STRUCTURE:
 - 5-15 chapters based on natural topic breaks
@@ -209,12 +430,13 @@ CHAPTER STRUCTURE:
 - Each chapter contains the COMPLETE text of that section
 
 OUTPUT FORMAT (JSON):
-{
+{{
   "chapters": [
-    {"title": "Introduction", "content": "Complete text of intro section..."},
-    {"title": "Section Name", "content": "Complete text of this section..."}
+    {{"title": "Introduction", "content": "Complete text...", "type": "text"}},
+    {{"title": "Python Function: example", "content": "...", "type": "code", "language": "python"}},
+    {{"title": "Section Name", "content": "Complete text...", "type": "text"}}
   ]
-}
+}}
 
 ---
 
@@ -234,9 +456,27 @@ WEBPAGE CONTENT TO CONVERT (include ALL of this in your chapters):
     chapters = []
     for ch in result.get("chapters", []):
         title = ch.get("title", "Untitled")
-        content = clean_for_speech(ch.get("content", ""))
-        if content:
-            chapters.append((title, content))
+        content = ch.get("content", "")
+        ch_type = ch.get("type", "text")
+        language = ch.get("language", "")
+
+        if ch_type == "code":
+            if code_mode == "skip":
+                # Just skip announcement
+                chapters.append((title, skip_code_text(language), main_voice))
+            elif code_mode == "verbatim":
+                # AI should have verbalized, but clean up
+                if content:
+                    chapters.append((title, content, code_voice))
+            elif code_mode == "describe":
+                # AI description
+                if content:
+                    chapters.append((title, content, main_voice))
+        else:
+            # Regular text
+            content = clean_for_speech(content)
+            if content:
+                chapters.append((title, content, main_voice))
 
     return chapters
 
@@ -268,12 +508,15 @@ def get_page_id(source):
 
 
 class Page2Pod:
-    def __init__(self, source, output_dir=None, cache_dir=None, voice=DEFAULT_VOICE, model=DEFAULT_MODEL):
+    def __init__(self, source, output_dir=None, cache_dir=None, voice=DEFAULT_VOICE,
+                 code_voice=DEFAULT_CODE_VOICE, model=DEFAULT_MODEL, code_mode="skip"):
         # Resolve local paths to absolute
         if not source.startswith(('http://', 'https://')):
             source = str(Path(source).resolve())
         self.source = source
         self.voice = voice
+        self.code_voice = code_voice
+        self.code_mode = code_mode
         self.model = model
         self.client = OpenAI()
 
@@ -315,8 +558,11 @@ class Page2Pod:
         """Save metadata"""
         self.meta_file.write_text(json.dumps(meta, indent=2))
 
-    def generate_audio(self, text):
+    def generate_audio(self, text, voice=None):
         """Generate audio using OpenAI TTS"""
+        if voice is None:
+            voice = self.voice
+
         chunks = []
         remaining = text
 
@@ -329,7 +575,7 @@ class Page2Pod:
 
             response = self.client.audio.speech.create(
                 model=self.model,
-                voice=self.voice,
+                voice=voice,
                 input=chunk
             )
             chunks.append(response.content)
@@ -385,6 +631,8 @@ class Page2Pod:
         print(f"page2pod: {self.source}")
         print(f"Cache: {self.cache_dir}")
         print(f"Mode: {'AI chapter extraction' if use_ai else 'H2-based extraction'}")
+        print(f"Voices: {self.voice} (main), {self.code_voice} (code)")
+        print(f"Code: {self.code_mode}")
         print("=" * 50)
 
         # Load and parse
@@ -392,14 +640,22 @@ class Page2Pod:
 
         if use_ai:
             print("Analyzing content with AI...")
-            chapters = extract_chapters_ai(html, self.client)
+            chapters = extract_chapters_ai(html, self.client,
+                                           code_voice=self.code_voice,
+                                           main_voice=self.voice,
+                                           code_mode=self.code_mode)
         else:
             soup = BeautifulSoup(html, 'html.parser')
-            chapters = extract_chapters(soup)
+            chapters = extract_chapters(soup,
+                                        code_voice=self.code_voice,
+                                        main_voice=self.voice,
+                                        code_mode=self.code_mode,
+                                        client=self.client)
 
         print(f"Found {len(chapters)} chapters:")
-        for i, (title, text) in enumerate(chapters):
-            print(f"  [{i}] {title} ({len(text)} chars)")
+        for i, (title, text, voice) in enumerate(chapters):
+            voice_indicator = " [code]" if voice == self.code_voice else ""
+            print(f"  [{i}] {title} ({len(text)} chars){voice_indicator}")
 
         if list_only:
             return
@@ -410,10 +666,10 @@ class Page2Pod:
         generated = 0
         skipped = 0
 
-        for idx, (title, text) in enumerate(chapters):
+        for idx, (title, text, voice) in enumerate(chapters):
             filename = f"{idx:02d}-{slugify(title)}.mp3"
             chapter_file = self.chapters_dir / filename
-            text_hash = get_hash(text)
+            text_hash = get_hash(text + voice)  # Include voice in hash
 
             # Save chapter text for reference
             text_file = self.chapters_dir / f"{idx:02d}-{slugify(title)}.txt"
@@ -429,13 +685,14 @@ class Page2Pod:
             )
 
             if needs_gen and not combine_only:
-                print(f"\n[{idx}] Generating: {title}...")
-                audio_data = self.generate_audio(text)
+                voice_label = "code" if voice == self.code_voice else "main"
+                print(f"\n[{idx}] Generating: {title} [{voice_label}]...")
+                audio_data = self.generate_audio(text, voice=voice)
                 chapter_file.write_bytes(audio_data)
                 duration = self.get_duration(chapter_file)
                 print(f"    Saved: {filename} ({duration:.1f}s)")
 
-                meta["chapters"][filename] = {"hash": text_hash, "title": title}
+                meta["chapters"][filename] = {"hash": text_hash, "title": title, "voice": voice}
                 generated += 1
             else:
                 if chapter_file.exists():
@@ -513,7 +770,13 @@ def main():
     parser.add_argument("-c", "--cache", help="Cache directory")
     parser.add_argument("-v", "--voice", default=DEFAULT_VOICE,
                         choices=["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
-                        help="OpenAI TTS voice")
+                        help="OpenAI TTS voice for main content")
+    parser.add_argument("--code-voice", default=DEFAULT_CODE_VOICE,
+                        choices=["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                        help="OpenAI TTS voice for code (default: nova)")
+    parser.add_argument("--code-mode", default="skip",
+                        choices=["skip", "verbatim", "describe"],
+                        help="How to handle code: skip (default), verbatim, or describe")
     parser.add_argument("--quality", default=DEFAULT_MODEL,
                         choices=["tts-1", "tts-1-hd"],
                         help="TTS model quality")
@@ -537,6 +800,8 @@ def main():
         output_dir=args.output,
         cache_dir=cache_dir,
         voice=args.voice,
+        code_voice=args.code_voice,
+        code_mode=args.code_mode,
         model=args.quality
     )
 
