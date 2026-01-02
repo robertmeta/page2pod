@@ -167,36 +167,47 @@ def extract_chapters_ai(html, client):
     text = get_text_content(main)
 
     # Truncate if too long (keep under token limits)
-    if len(text) > 30000:
-        text = text[:30000] + "\n\n[Content truncated...]"
+    if len(text) > 60000:
+        text = text[:60000] + "\n\n[Content truncated...]"
 
-    prompt = """Analyze this webpage content and divide it into logical chapters for an audio version.
+    prompt = """You are converting a webpage into a podcast/audiobook format.
 
-Return JSON with this exact format:
+GOAL: Divide this content into chapters so it can be read aloud by text-to-speech.
+The output will be fed to TTS, so every word matters.
+
+CRITICAL REQUIREMENTS:
+1. PRESERVE ALL CONTENT VERBATIM - Do NOT summarize, paraphrase, or shorten anything
+2. Every sentence from the input must appear in exactly one chapter
+3. The combined chapter contents must equal the original text (minus navigation/UI elements)
+4. This is NOT a summary - it's a structural reorganization for audio playback
+
+CHAPTER GUIDELINES:
+- Create 5-20 chapters based on natural topic/section breaks
+- Each chapter should be a coherent section (like a podcast segment)
+- Use clear, descriptive titles that tell the listener what's coming
+- First chapter is typically "Introduction" or the page title
+
+OUTPUT FORMAT (JSON):
 {
   "chapters": [
-    {"title": "Chapter Title", "content": "Full text content for this chapter..."},
-    {"title": "Another Chapter", "content": "Content..."}
+    {"title": "Descriptive Chapter Title", "content": "Complete verbatim text for this section..."},
+    {"title": "Next Section Title", "content": "All the text from this section..."}
   ]
 }
 
-Rules:
-- Create 3-15 chapters based on natural topic breaks
-- Each chapter should be 1-5 paragraphs
-- Use clear, descriptive titles (not "Chapter 1")
-- Include ALL the text content, distributed across chapters
-- Clean up the text for audio (remove URLs, fix abbreviations)
-- First chapter can be "Introduction" if appropriate
+REMEMBER: Do not lose ANY content. Every word below must appear in your output.
 
-Content to analyze:
+---
+
+CONTENT TO DIVIDE INTO CHAPTERS:
 
 """ + text
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
-        temperature=0.3
+        temperature=0.1
     )
 
     result = json.loads(response.choices[0].message.content)
