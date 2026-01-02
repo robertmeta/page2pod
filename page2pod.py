@@ -2,11 +2,12 @@
 """
 page2pod - Convert web pages and articles to chapter-based podcasts.
 
-Generates MP3 audio with chapter markers from HTML content.
+Generates MP3 audio with chapter markers from HTML or Markdown content.
 Caches individual chapters so only changed sections are regenerated.
 
 Usage:
     page2pod <input.html> [options]
+    page2pod <input.md> [options]
     page2pod <url> [options]
 
 Options:
@@ -96,6 +97,127 @@ def clean_for_speech(text):
         text = re.sub(rf'\b{abbr}\b', full, text)
 
     return text.strip()
+
+
+def parse_markdown_frontmatter(content):
+    """Extract frontmatter and body from markdown"""
+    if not content.startswith('---'):
+        return {}, content
+
+    parts = content.split('---', 2)
+    if len(parts) < 3:
+        return {}, content
+
+    frontmatter = {}
+    for line in parts[1].strip().split('\n'):
+        if ':' in line:
+            key, value = line.split(':', 1)
+            frontmatter[key.strip()] = value.strip().strip('"\'')
+
+    return frontmatter, parts[2].strip()
+
+
+def clean_markdown(text):
+    """Remove markdown formatting for TTS"""
+    # Remove links but keep text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    # Remove image syntax
+    text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', r'', text)
+    # Remove bold/italic
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    text = re.sub(r'\*([^*]+)\*', r'\1', text)
+    text = re.sub(r'__([^_]+)__', r'\1', text)
+    text = re.sub(r'_([^_]+)_', r'\1', text)
+    # Remove inline code backticks
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Remove blockquotes
+    text = re.sub(r'^>\s*', '', text, flags=re.MULTILINE)
+    # Remove horizontal rules
+    text = re.sub(r'^---+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\*\*\*+$', '', text, flags=re.MULTILINE)
+    # Clean whitespace
+    text = re.sub(r'\n\n+', '\n\n', text).strip()
+    return text
+
+
+def extract_chapters_markdown(content, title=None, code_voice=DEFAULT_CODE_VOICE,
+                               main_voice=DEFAULT_VOICE, code_mode="skip", client=None):
+    """
+    Extract chapters from Markdown using H2 headings.
+    Code blocks become separate chapters based on code_mode.
+    Returns list of (title, text, voice) tuples.
+    """
+    frontmatter, body = parse_markdown_frontmatter(content)
+
+    if title is None:
+        title = frontmatter.get('title', 'Untitled')
+
+    chapters = []
+
+    # Split by code blocks first, then by H2
+    code_pattern = r'```([\w]*)\n(.*?)\n```'
+
+    # Split by H2 headings
+    h2_pattern = r'^##\s+(.+)$'
+    sections = re.split(h2_pattern, body, flags=re.MULTILINE)
+
+    def process_section(section_content, section_title):
+        """Process a section, splitting out code blocks"""
+        result = []
+        parts = re.split(code_pattern, section_content, flags=re.DOTALL)
+
+        text_idx = 0
+        i = 0
+        while i < len(parts):
+            if i % 3 == 0:
+                # Text part
+                text = clean_markdown(parts[i])
+                text = clean_for_speech(text)
+                if text.strip():
+                    title_suffix = f" (Part {text_idx + 1})" if text_idx > 0 else ""
+                    result.append((section_title + title_suffix, text, main_voice))
+                    text_idx += 1
+                i += 1
+            else:
+                # Code block: parts[i] = language, parts[i+1] = code
+                language = parts[i] if i < len(parts) else ""
+                code = parts[i + 1] if i + 1 < len(parts) else ""
+                if code.strip():
+                    code_title = get_code_block_title(code, language)
+
+                    if code_mode == "skip":
+                        result.append((code_title, skip_code_text(language), main_voice))
+                    elif code_mode == "verbatim":
+                        verbalized = verbalize_code(code)
+                        result.append((code_title, verbalized, code_voice))
+                    elif code_mode == "describe" and client:
+                        description = describe_code_ai(code, language, client)
+                        result.append((code_title, description, main_voice))
+                    else:
+                        result.append((code_title, skip_code_text(language), main_voice))
+                i += 2
+
+        return result
+
+    # Handle intro (before first H2)
+    if sections[0].strip():
+        chapters.extend(process_section(sections[0], "Introduction"))
+
+    # Handle H2 sections
+    for i in range(1, len(sections), 2):
+        if i + 1 <= len(sections):
+            h2_title = sections[i].strip()
+            h2_content = sections[i + 1] if i + 1 < len(sections) else ""
+            chapters.extend(process_section(h2_content, h2_title))
+
+    # If no chapters found, treat whole body as one chapter
+    if not chapters:
+        text = clean_markdown(body)
+        text = clean_for_speech(text)
+        if text:
+            chapters.append((title, text, main_voice))
+
+    return chapters
 
 
 def verbalize_code(code):
@@ -534,19 +656,27 @@ class Page2Pod:
         self.meta_file = self.cache_dir / "meta.json"
         self.source_file = self.cache_dir / "source.html"
 
+    def is_markdown(self):
+        """Check if source is a markdown file"""
+        if self.source.startswith(('http://', 'https://')):
+            return self.source.endswith('.md')
+        return Path(self.source).suffix.lower() == '.md'
+
     def load_content(self):
-        """Load HTML content from file or URL"""
+        """Load content from file or URL"""
         if self.source.startswith(('http://', 'https://')):
             import requests
             response = requests.get(self.source, timeout=30)
             response.raise_for_status()
-            html = response.text
+            content = response.text
         else:
-            html = Path(self.source).read_text()
+            content = Path(self.source).read_text()
 
         # Save source for reference
-        self.source_file.write_text(html)
-        return html
+        ext = '.md' if self.is_markdown() else '.html'
+        self.source_file = self.cache_dir / f"source{ext}"
+        self.source_file.write_text(content)
+        return content
 
     def load_meta(self):
         """Load cached metadata"""
@@ -628,24 +758,34 @@ class Page2Pod:
 
     def process(self, force=False, combine_only=False, chapter_num=None, list_only=False, use_ai=False):
         """Process the page into podcast"""
+        is_md = self.is_markdown()
         print(f"page2pod: {self.source}")
         print(f"Cache: {self.cache_dir}")
-        print(f"Mode: {'AI chapter extraction' if use_ai else 'H2-based extraction'}")
+        print(f"Format: {'Markdown' if is_md else 'HTML'}")
+        if not is_md:
+            print(f"Mode: {'AI chapter extraction' if use_ai else 'H2-based extraction'}")
         print(f"Voices: {self.voice} (main), {self.code_voice} (code)")
         print(f"Code: {self.code_mode}")
         print("=" * 50)
 
         # Load and parse
-        html = self.load_content()
+        content = self.load_content()
 
-        if use_ai:
+        if is_md:
+            # Markdown: always use H2-based extraction
+            chapters = extract_chapters_markdown(content,
+                                                  code_voice=self.code_voice,
+                                                  main_voice=self.voice,
+                                                  code_mode=self.code_mode,
+                                                  client=self.client)
+        elif use_ai:
             print("Analyzing content with AI...")
-            chapters = extract_chapters_ai(html, self.client,
+            chapters = extract_chapters_ai(content, self.client,
                                            code_voice=self.code_voice,
                                            main_voice=self.voice,
                                            code_mode=self.code_mode)
         else:
-            soup = BeautifulSoup(html, 'html.parser')
+            soup = BeautifulSoup(content, 'html.parser')
             chapters = extract_chapters(soup,
                                         code_voice=self.code_voice,
                                         main_voice=self.voice,
