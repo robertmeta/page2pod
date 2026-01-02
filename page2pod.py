@@ -132,6 +132,8 @@ def extract_chapters(soup, title=None):
     for i in range(1, len(parts), 2):
         if i + 1 < len(parts):
             h2_title = BeautifulSoup(parts[i], 'html.parser').get_text(separator=' ', strip=True)
+            # Clean up anchor link artifacts
+            h2_title = re.sub(r'\s*#\s*$', '', h2_title).strip()
             section_soup = BeautifulSoup(parts[i + 1], 'html.parser')
             section_text = clean_for_speech(get_text_content(section_soup))
 
