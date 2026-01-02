@@ -1,4 +1,0 @@
-openai
-mutagen
-beautifulsoup4
-requests
