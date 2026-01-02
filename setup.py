@@ -5,6 +5,8 @@ setup(
     version="0.1.0",
     description="Convert web pages to chapter-based podcasts",
     author="Robert Melton",
+    license="MIT",
+    url="https://github.com/robertmeta/page2pod",
     py_modules=["page2pod"],
     install_requires=[
         "openai",
@@ -18,4 +20,8 @@ setup(
         ],
     },
     python_requires=">=3.8",
+    classifiers=[
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+    ],
 )
