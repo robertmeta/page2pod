@@ -10,7 +10,7 @@ Usage:
     page2pod <url> [options]
 
 Options:
-    -o, --output DIR      Output directory (default: ./page2pod_output)
+    -o, --output DIR      Output directory (default: current directory)
     -c, --cache DIR       Cache directory (default: ~/.cache/page2pod)
     -v, --voice VOICE     OpenAI TTS voice (default: onyx)
     --force               Force regenerate all chapters
@@ -18,6 +18,7 @@ Options:
     --chapter N           Regenerate only chapter N
     --list                List chapters without generating
     --quality MODEL       TTS model: tts-1 or tts-1-hd (default: tts-1-hd)
+    --no-ai               Use H2-based extraction instead of AI (default: AI)
 
 Requirements:
     pip install openai mutagen beautifulsoup4 requests
@@ -170,36 +171,54 @@ def extract_chapters_ai(html, client):
     if len(text) > 60000:
         text = text[:60000] + "\n\n[Content truncated...]"
 
-    prompt = """You are converting a webpage into a podcast/audiobook format.
+    prompt = """You are preparing a webpage for audio playback via text-to-speech (TTS).
 
-GOAL: Divide this content into chapters so it can be read aloud by text-to-speech.
-The output will be fed to TTS, so every word matters.
+HOW THIS WILL BE USED:
+- The webpage displays an audio player with chapter navigation
+- Users see the ORIGINAL webpage content AND an audio player
+- Chapters let users jump to specific sections in the audio
+- The chapter content you provide will be spoken aloud by TTS
+- Users may read along while listening, so content must match the original
 
-CRITICAL REQUIREMENTS:
-1. PRESERVE ALL CONTENT VERBATIM - Do NOT summarize, paraphrase, or shorten anything
-2. Every sentence from the input must appear in exactly one chapter
-3. The combined chapter contents must equal the original text (minus navigation/UI elements)
-4. This is NOT a summary - it's a structural reorganization for audio playback
+CRITICAL UNDERSTANDING:
+This is NOT a summary. The chapters appear ALONGSIDE the original content on the same page.
+If your audio says different things than what's on screen, it breaks the reading-along experience.
+Your job is to COPY the content into chapters, with only minor audio-friendly tweaks.
 
-CHAPTER GUIDELINES:
-- Create 5-20 chapters based on natural topic/section breaks
-- Each chapter should be a coherent section (like a podcast segment)
-- Use clear, descriptive titles that tell the listener what's coming
-- First chapter is typically "Introduction" or the page title
+YOUR TASK:
+1. Divide the webpage into logical chapter sections (for navigation)
+2. Copy ALL content from each section into the chapter
+3. Make only tiny tweaks for audio clarity (see below)
+
+CONTENT PRESERVATION RULES:
+- Every sentence from the input MUST appear in your output
+- Every paragraph MUST be included, nearly word-for-word
+- Your total output should be the SAME LENGTH as the input
+- If input is 8000 words, output must be ~8000 words
+- Think of yourself as a COPY EDITOR, not a summarizer
+
+MINOR AUDIO TWEAKS ONLY:
+- Remove URLs/email addresses (say "contact info on website" if needed)
+- Remove "Click here", "Read more", "Back to top" navigation text
+- Expand confusing abbreviations for speech
+- Remove image/diagram references that won't be visible
+
+CHAPTER STRUCTURE:
+- 5-15 chapters based on natural topic breaks
+- Clear, descriptive titles
+- Each chapter contains the COMPLETE text of that section
 
 OUTPUT FORMAT (JSON):
 {
   "chapters": [
-    {"title": "Descriptive Chapter Title", "content": "Complete verbatim text for this section..."},
-    {"title": "Next Section Title", "content": "All the text from this section..."}
+    {"title": "Introduction", "content": "Complete text of intro section..."},
+    {"title": "Section Name", "content": "Complete text of this section..."}
   ]
 }
 
-REMEMBER: Do not lose ANY content. Every word below must appear in your output.
-
 ---
 
-CONTENT TO DIVIDE INTO CHAPTERS:
+WEBPAGE CONTENT TO CONVERT (include ALL of this in your chapters):
 
 """ + text
 
@@ -365,8 +384,7 @@ class Page2Pod:
         """Process the page into podcast"""
         print(f"page2pod: {self.source}")
         print(f"Cache: {self.cache_dir}")
-        if use_ai:
-            print("Mode: AI chapter extraction")
+        print(f"Mode: {'AI chapter extraction' if use_ai else 'H2-based extraction'}")
         print("=" * 50)
 
         # Load and parse
@@ -507,8 +525,8 @@ def main():
                         help="Regenerate only this chapter number")
     parser.add_argument("--list", action="store_true",
                         help="List chapters without generating")
-    parser.add_argument("--ai", action="store_true",
-                        help="Use AI to extract chapters (better for unstructured pages)")
+    parser.add_argument("--no-ai", action="store_true",
+                        help="Use H2-based extraction instead of AI")
 
     args = parser.parse_args()
 
@@ -527,7 +545,7 @@ def main():
         combine_only=args.combine,
         chapter_num=args.chapter,
         list_only=args.list,
-        use_ai=args.ai
+        use_ai=not args.no_ai
     )
 
 
