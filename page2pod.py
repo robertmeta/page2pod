@@ -93,8 +93,7 @@ def clean_for_speech(text):
 
 def extract_chapters(soup, title=None):
     """
-    Extract chapters from HTML.
-    Uses H1 for title, H2 for chapter breaks.
+    Extract chapters from HTML using H2 headings.
     Returns list of (title, text) tuples.
     """
     chapters = []
@@ -145,6 +144,69 @@ def extract_chapters(soup, title=None):
         full_text = clean_for_speech(get_text_content(main))
         if full_text:
             chapters.append((title, full_text))
+
+    return chapters
+
+
+def extract_chapters_ai(html, client):
+    """
+    Extract chapters using AI for better semantic understanding.
+    Works on pages without clear H2 structure.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Get clean text content
+    main = soup.find('main') or soup.find('article') or soup.find('body')
+    if not main:
+        main = soup
+
+    # Remove nav, footer, scripts, etc.
+    for tag in main.find_all(['nav', 'footer', 'script', 'style', 'noscript']):
+        tag.decompose()
+
+    text = get_text_content(main)
+
+    # Truncate if too long (keep under token limits)
+    if len(text) > 30000:
+        text = text[:30000] + "\n\n[Content truncated...]"
+
+    prompt = """Analyze this webpage content and divide it into logical chapters for an audio version.
+
+Return JSON with this exact format:
+{
+  "chapters": [
+    {"title": "Chapter Title", "content": "Full text content for this chapter..."},
+    {"title": "Another Chapter", "content": "Content..."}
+  ]
+}
+
+Rules:
+- Create 3-15 chapters based on natural topic breaks
+- Each chapter should be 1-5 paragraphs
+- Use clear, descriptive titles (not "Chapter 1")
+- Include ALL the text content, distributed across chapters
+- Clean up the text for audio (remove URLs, fix abbreviations)
+- First chapter can be "Introduction" if appropriate
+
+Content to analyze:
+
+""" + text
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0.3
+    )
+
+    result = json.loads(response.choices[0].message.content)
+
+    chapters = []
+    for ch in result.get("chapters", []):
+        title = ch.get("title", "Untitled")
+        content = clean_for_speech(ch.get("content", ""))
+        if content:
+            chapters.append((title, content))
 
     return chapters
 
@@ -288,16 +350,23 @@ class Page2Pod:
 
         audio.save()
 
-    def process(self, force=False, combine_only=False, chapter_num=None, list_only=False):
+    def process(self, force=False, combine_only=False, chapter_num=None, list_only=False, use_ai=False):
         """Process the page into podcast"""
         print(f"page2pod: {self.source}")
         print(f"Cache: {self.cache_dir}")
+        if use_ai:
+            print("Mode: AI chapter extraction")
         print("=" * 50)
 
         # Load and parse
         html = self.load_content()
-        soup = BeautifulSoup(html, 'html.parser')
-        chapters = extract_chapters(soup)
+
+        if use_ai:
+            print("Analyzing content with AI...")
+            chapters = extract_chapters_ai(html, self.client)
+        else:
+            soup = BeautifulSoup(html, 'html.parser')
+            chapters = extract_chapters(soup)
 
         print(f"Found {len(chapters)} chapters:")
         for i, (title, text) in enumerate(chapters):
@@ -427,6 +496,8 @@ def main():
                         help="Regenerate only this chapter number")
     parser.add_argument("--list", action="store_true",
                         help="List chapters without generating")
+    parser.add_argument("--ai", action="store_true",
+                        help="Use AI to extract chapters (better for unstructured pages)")
 
     args = parser.parse_args()
 
@@ -444,7 +515,8 @@ def main():
         force=args.force,
         combine_only=args.combine,
         chapter_num=args.chapter,
-        list_only=args.list
+        list_only=args.list,
+        use_ai=args.ai
     )
 
 
