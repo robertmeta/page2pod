@@ -1,5 +1,7 @@
 # page2pod
 
+**An [Intelligrit Labs](https://intelligrit.com#labs) Project**
+
 Convert web pages and articles to chapter-based podcasts using OpenAI TTS.
 
 ## Features
@@ -95,6 +97,10 @@ fetch('article.chapters.json')
 ## Environment
 
 Requires `OPENAI_API_KEY` environment variable.
+
+## About Intelligrit Labs
+
+page2pod is developed by [Intelligrit Labs](https://intelligrit.com#labs), the R&D arm of Intelligrit LLC. We build tools for ourselves and release them for everyone. Intelligrit delivers AI-driven IT modernization for federal agencies.
 
 ## License
 
