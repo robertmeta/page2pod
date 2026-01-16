@@ -6,7 +6,7 @@ setup(
     description="Convert web pages to chapter-based podcasts",
     author="Robert Melton",
     license="MIT",
-    url="https://github.com/robertmeta/page2pod",
+    url="https://github.com/intelligrit/page2pod",
     py_modules=["page2pod"],
     install_requires=[
         "openai",
